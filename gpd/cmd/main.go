@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"gpd/aws"
 	"gpd/config"
@@ -20,6 +23,9 @@ func main() {
 }
 
 func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
@@ -44,6 +50,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize redshift connection: %w", err)
 	}
+	defer redshiftConn.Close()
 
 	ftpClientConfig, err := ftp.NewClientConfig(cfg.FTP)
 	if err != nil {
@@ -83,9 +90,11 @@ func run() error {
 		cfg.AWS.SQSWaitSeconds,
 	)
 
-	if err := emailProcessor.PollSQS(context.Background()); err != nil {
+	if err := emailProcessor.PollSQS(ctx); err != nil {
 		return fmt.Errorf("poll sqs: %w", err)
 	}
+
+	appLogger.Printf("shutdown complete: redshift pool closed")
 
 	return nil
 }

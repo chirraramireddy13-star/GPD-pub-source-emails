@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 
+	awscfg "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"gpd/config"
 )
 
@@ -29,10 +32,17 @@ func NewS3Client(cfg config.AWSConfig) (*S3Client, error) {
 		return nil, fmt.Errorf("AWS_S3_BUCKET is required")
 	}
 
+	awsConfig, err := awscfg.LoadDefaultConfig(context.Background(), awscfg.WithRegion(cfg.Region))
+	if err != nil {
+		return nil, fmt.Errorf("load aws config for s3: %w", err)
+	}
+
+	s3API := awss3.NewFromConfig(awsConfig)
+
 	return &S3Client{
 		Region: cfg.Region,
 		Bucket: cfg.S3Bucket,
-		getter: defaultGetter,
+		getter: newS3Getter(s3API),
 	}, nil
 }
 
@@ -64,4 +74,18 @@ func (c *S3Client) GetObject(ctx context.Context, input GetObjectInput) (io.Read
 
 func defaultGetter(_ context.Context, _, _ string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("s3 getter is not configured")
+}
+
+func newS3Getter(api *awss3.Client) S3Getter {
+	return func(ctx context.Context, bucket string, key string) (io.ReadCloser, error) {
+		output, err := api.GetObject(ctx, &awss3.GetObjectInput{
+			Bucket: &bucket,
+			Key:    &key,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return output.Body, nil
+	}
 }

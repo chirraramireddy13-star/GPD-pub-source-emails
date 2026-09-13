@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"gpd/config"
 )
 
@@ -17,6 +19,7 @@ type RedshiftConnection struct {
 	User             string
 	SSLMode          string
 	DSN              string
+	pool             *pgxpool.Pool
 	emailLookupQuery EmailLookupQuery
 }
 
@@ -52,6 +55,11 @@ func NewRedshiftConnection(cfg config.RedshiftConfig) (*RedshiftConnection, erro
 		cfg.SSLMode,
 	)
 
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		return nil, fmt.Errorf("connect to redshift: %w", err)
+	}
+
 	return &RedshiftConnection{
 		Host:             cfg.Host,
 		Port:             cfg.Port,
@@ -59,7 +67,8 @@ func NewRedshiftConnection(cfg config.RedshiftConfig) (*RedshiftConnection, erro
 		User:             cfg.User,
 		SSLMode:          cfg.SSLMode,
 		DSN:              dsn,
-		emailLookupQuery: defaultEmailLookupQuery,
+		pool:             pool,
+		emailLookupQuery: newEmailLookupQuery(pool),
 	}, nil
 }
 
@@ -144,4 +153,35 @@ func normalizeEmailValue(value string) string {
 
 func defaultEmailLookupQuery(_ context.Context, _ string, _ []any) ([]string, error) {
 	return nil, fmt.Errorf("redshift email lookup query is not configured")
+}
+
+func newEmailLookupQuery(pool *pgxpool.Pool) EmailLookupQuery {
+	return func(ctx context.Context, query string, args []any) ([]string, error) {
+		rows, err := pool.Query(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		results := make([]string, 0)
+		for rows.Next() {
+			var email string
+			if err := rows.Scan(&email); err != nil {
+				return nil, err
+			}
+			results = append(results, email)
+		}
+
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		return results, nil
+	}
+}
+
+func (c *RedshiftConnection) Close() {
+	if c.pool != nil {
+		c.pool.Close()
+	}
 }

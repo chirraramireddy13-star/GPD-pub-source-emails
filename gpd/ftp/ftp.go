@@ -3,9 +3,14 @@ package ftp
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 
 	"gpd/config"
 )
@@ -65,9 +70,14 @@ func NewClientConfig(cfg config.FTPConfig) (*ClientConfig, error) {
 }
 
 func NewClient(cfg ClientConfig) *Client {
+	uploader := defaultUploader
+	if cfg.Protocol == "sftp" {
+		uploader = sftpUploader
+	}
+
 	return &Client{
 		config:   cfg,
-		uploader: defaultUploader,
+		uploader: uploader,
 	}
 }
 
@@ -121,4 +131,88 @@ func (c *Client) UploadFiles(ctx context.Context, localPaths []string) ([]string
 
 func defaultUploader(_ context.Context, cfg ClientConfig, localPath string, remotePath string) error {
 	return fmt.Errorf("ftp uploader is not configured for %s://%s:%d (%s -> %s)", cfg.Protocol, cfg.Host, cfg.Port, localPath, remotePath)
+}
+
+func sftpUploader(ctx context.Context, cfg ClientConfig, localPath string, remotePath string) error {
+	sshConfig := &ssh.ClientConfig{
+		User:            cfg.User,
+		Auth:            []ssh.AuthMethod{ssh.Password(cfg.Password)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         0,
+	}
+
+	address := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	sshClient, err := ssh.Dial("tcp", address, sshConfig)
+	if err != nil {
+		return err
+	}
+	defer sshClient.Close()
+
+	client, err := sftp.NewClient(sshClient)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if err := ensureRemoteDir(ctx, client, path.Dir(remotePath)); err != nil {
+		return err
+	}
+
+	localFile, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer localFile.Close()
+
+	remoteFile, err := client.Create(remotePath)
+	if err != nil {
+		return err
+	}
+	defer remoteFile.Close()
+
+	if _, err := io.Copy(remoteFile, localFile); err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func ensureRemoteDir(ctx context.Context, client *sftp.Client, remoteDir string) error {
+	if remoteDir == "." || remoteDir == "/" || remoteDir == "" {
+		return nil
+	}
+
+	parts := strings.Split(strings.TrimPrefix(remoteDir, "/"), "/")
+	current := ""
+	if strings.HasPrefix(remoteDir, "/") {
+		current = "/"
+	}
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		current = path.Join(current, part)
+		if err := client.Mkdir(current); err != nil && !isSFTPPathExists(client, current) {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+
+	return nil
+}
+
+func isSFTPPathExists(client *sftp.Client, remotePath string) bool {
+	_, err := client.Stat(remotePath)
+	return err == nil
 }

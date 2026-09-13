@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	awscfg "github.com/aws/aws-sdk-go-v2/config"
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	"gpd/config"
 )
 
@@ -41,11 +44,18 @@ func NewSQSClient(cfg config.AWSConfig) (*SQSClient, error) {
 		return nil, fmt.Errorf("AWS_SQS_QUEUE_URL is required")
 	}
 
+	awsConfig, err := awscfg.LoadDefaultConfig(context.Background(), awscfg.WithRegion(cfg.Region))
+	if err != nil {
+		return nil, fmt.Errorf("load aws config for sqs: %w", err)
+	}
+
+	sqsAPI := awssqs.NewFromConfig(awsConfig)
+
 	return &SQSClient{
 		Region:   cfg.Region,
 		QueueURL: cfg.SQSQueueURL,
-		receiver: defaultReceiver,
-		deleter:  defaultDeleter,
+		receiver: newSQSReceiver(sqsAPI),
+		deleter:  newSQSDeleter(sqsAPI),
 	}, nil
 }
 
@@ -102,4 +112,45 @@ func defaultReceiver(_ context.Context, _ string, _ ReceiveMessageInput) ([]SQSM
 
 func defaultDeleter(_ context.Context, _ string, _ DeleteMessageInput) error {
 	return fmt.Errorf("sqs deleter is not configured")
+}
+
+func newSQSReceiver(api *awssqs.Client) SQSReceiver {
+	return func(ctx context.Context, queueURL string, input ReceiveMessageInput) ([]SQSMessage, error) {
+		output, err := api.ReceiveMessage(ctx, &awssqs.ReceiveMessageInput{
+			QueueUrl:            &queueURL,
+			MaxNumberOfMessages: int32(input.MaxNumberOfMessages),
+			WaitTimeSeconds:     int32(input.WaitTimeSeconds),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		messages := make([]SQSMessage, 0, len(output.Messages))
+		for _, msg := range output.Messages {
+			messages = append(messages, SQSMessage{
+				MessageID:     valueOrEmpty(msg.MessageId),
+				ReceiptHandle: valueOrEmpty(msg.ReceiptHandle),
+				Body:          valueOrEmpty(msg.Body),
+			})
+		}
+
+		return messages, nil
+	}
+}
+
+func newSQSDeleter(api *awssqs.Client) SQSDeleter {
+	return func(ctx context.Context, queueURL string, input DeleteMessageInput) error {
+		_, err := api.DeleteMessage(ctx, &awssqs.DeleteMessageInput{
+			QueueUrl:      &queueURL,
+			ReceiptHandle: &input.ReceiptHandle,
+		})
+		return err
+	}
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
