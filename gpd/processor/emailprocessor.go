@@ -58,7 +58,6 @@ type EmailProcessor struct {
 	ftpClient         *ftp.Client
 	expectedBucket    string
 	batchSettings     email.BatchSettings
-	firehoseFormat    string
 	redshiftChunkSize int
 	maxMessages       int
 	longPollWaitTime  int
@@ -77,6 +76,7 @@ type messageProcessingState struct {
 	createdFiles        []string
 	uploadedPaths       []string
 	duplicateRemoved    int
+	detectedFormat      string
 }
 
 func NewEmailProcessor(cfg *config.Config, logger *log.Logger, s3Client *aws.S3Client, sqsClient *aws.SQSClient, redshiftConn *database.RedshiftConnection, ftpClient *ftp.Client) (*EmailProcessor, error) {
@@ -112,7 +112,6 @@ func NewEmailProcessor(cfg *config.Config, logger *log.Logger, s3Client *aws.S3C
 		ftpClient:         ftpClient,
 		expectedBucket:    cfg.AWS.S3Bucket,
 		batchSettings:     batchSettings,
-		firehoseFormat:    cfg.Batch.OutputFormat,
 		redshiftChunkSize: cfg.Redshift.QueryChunkSize,
 		maxMessages:       cfg.AWS.SQSMaxMessages,
 		longPollWaitTime:  cfg.AWS.SQSWaitSeconds,
@@ -182,12 +181,13 @@ func (p *EmailProcessor) prepareMessageProcessingState(ctx context.Context, msg 
 	if err != nil {
 		return nil, newProcessingFailure(failureMalformedSQS, false, err)
 	}
-	if err := email.ValidateExpectedFirehoseObject(objectRef, p.expectedBucket, p.batchSettings); err != nil {
+	if err := email.ValidateExpectedFirehoseObject(objectRef, p.expectedBucket); err != nil {
 		return nil, newProcessingFailure(failureMalformedSQS, false, err)
 	}
 	state.objectRef = objectRef
+	state.detectedFormat = email.InferFirehoseFormatFromObjectKey(objectRef.Key)
 
-	p.logger.Printf("accepted message id=%s bucket=%s key=%s", msg.MessageID, objectRef.Bucket, objectRef.Key)
+	p.logger.Printf("accepted message id=%s bucket=%s key=%s formatHint=%s", msg.MessageID, objectRef.Bucket, objectRef.Key, state.detectedFormat)
 
 	objStream, err := p.getObjectWithRetry(ctx, state.objectRef)
 	if err != nil {
@@ -195,7 +195,7 @@ func (p *EmailProcessor) prepareMessageProcessingState(ctx context.Context, msg 
 	}
 	defer objStream.Close()
 
-	state.extractedEmails, state.extractionMetrics, err = email.ExtractEmailsFromFirehoseStreamWithMetrics(objStream, p.firehoseFormat)
+	state.extractedEmails, state.extractionMetrics, state.detectedFormat, err = email.ExtractEmailsFromFirehoseStreamWithDetectedFormat(objStream, state.detectedFormat)
 	if err != nil {
 		return nil, newProcessingFailure(failureCorruptedInput, false, err)
 	}
@@ -247,7 +247,7 @@ func (p *EmailProcessor) completeWithoutRequestFiles(ctx context.Context, state 
 }
 
 func (p *EmailProcessor) createAndUploadRequestFiles(ctx context.Context, state *messageProcessingState) error {
-	createdFiles, err := p.createRequestFilesWithRetry(ctx, state.verificationBatches)
+	createdFiles, err := p.createRequestFilesWithRetry(ctx, state.verificationBatches, state.detectedFormat)
 	if err != nil {
 		return err
 	}
@@ -286,8 +286,9 @@ func (p *EmailProcessor) createAndUploadRequestFiles(ctx context.Context, state 
 
 func (p *EmailProcessor) logProcessingMetrics(state *messageProcessingState) {
 	p.logger.Printf(
-		"processing metrics: s3 file processed=%s total records=%d invalid records=%d duplicate records removed=%d unique emails=%d emails already in redshift=%d new emails=%d number of request batches created=%d emails submitted=%d ftp files uploaded=%d processing duration=%s",
+		"processing metrics: s3 file processed=%s source format=%s total records=%d invalid records=%d duplicate records removed=%d unique emails=%d emails already in redshift=%d new emails=%d number of request batches created=%d emails submitted=%d ftp files uploaded=%d processing duration=%s",
 		state.objectRef.Key,
+		state.detectedFormat,
 		state.extractionMetrics.TotalRecords,
 		state.extractionMetrics.InvalidRecords,
 		state.duplicateRemoved,
@@ -368,10 +369,10 @@ func (p *EmailProcessor) lookupExistingEmailsWithRetry(ctx context.Context, uniq
 	return existing, nil
 }
 
-func (p *EmailProcessor) createRequestFilesWithRetry(ctx context.Context, verificationBatches []email.EmailVerificationRequestBatch) ([]string, error) {
+func (p *EmailProcessor) createRequestFilesWithRetry(ctx context.Context, verificationBatches []email.EmailVerificationRequestBatch, outputFormat string) ([]string, error) {
 	var createdFiles []string
 	err := p.runRetryStep(ctx, failureFileGeneration, processingRetryAttempts, transientStepRetryDelay, nil, func(attempt int) error {
-		result, err := email.CreateVerificationRequestFiles(verificationBatches, p.batchSettings, p.firehoseFormat)
+		result, err := email.CreateVerificationRequestFiles(verificationBatches, p.batchSettings, outputFormat)
 		if err != nil {
 			return err
 		}

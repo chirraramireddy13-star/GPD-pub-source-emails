@@ -51,9 +51,6 @@ type FTPConfig struct {
 
 type BatchConfig struct {
 	BatchSize         int
-	FileNamePrefix    string
-	FileNameExtension string
-	OutputFormat      string
 	RequestFilePrefix string
 	RequestOutputDir  string
 }
@@ -127,9 +124,6 @@ func Load() (*Config, error) {
 		},
 		Batch: BatchConfig{
 			BatchSize:         batchSize,
-			FileNamePrefix:    getEnv("FILE_NAME_PREFIX", "emails"),
-			FileNameExtension: getEnv("FILE_NAME_EXTENSION", ".json"),
-			OutputFormat:      strings.ToLower(getEnv("FIREHOSE_OUTPUT_FORMAT", "json")),
 			RequestFilePrefix: getEnv("REQUEST_FILE_PREFIX", "batch"),
 			RequestOutputDir:  getEnv("REQUEST_OUTPUT_DIR", "out/verification_requests"),
 		},
@@ -178,9 +172,6 @@ func (c *Config) Validate() error {
 		missing = append(missing, "FTP_PASSWORD")
 	}
 
-	if c.Batch.FileNamePrefix == "" {
-		missing = append(missing, "FILE_NAME_PREFIX")
-	}
 	if strings.TrimSpace(c.Batch.RequestFilePrefix) == "" {
 		missing = append(missing, "REQUEST_FILE_PREFIX")
 	}
@@ -206,9 +197,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Batch.BatchSize <= 0 {
 		return fmt.Errorf("invalid BATCH_SIZE: %d", c.Batch.BatchSize)
-	}
-	if c.Batch.OutputFormat != "csv" && c.Batch.OutputFormat != "json" {
-		return fmt.Errorf("invalid FIREHOSE_OUTPUT_FORMAT: %s", c.Batch.OutputFormat)
 	}
 	if c.AWS.SQSMaxMessages < 1 || c.AWS.SQSMaxMessages > 10 {
 		return fmt.Errorf("invalid SQS_MAX_MESSAGES: %d (allowed 1-10)", c.AWS.SQSMaxMessages)

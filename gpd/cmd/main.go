@@ -59,11 +59,9 @@ func run() error {
 	ftpClient := ftp.NewClient(*ftpClientConfig)
 
 	batchSize := cfg.Batch.BatchSize
-	filePrefix := cfg.Batch.FileNamePrefix
-	fileExtension := cfg.Batch.FileNameExtension
 
 	appLogger.Printf(
-		"initialized app env=%s awsRegion=%s s3Bucket=%s sqsQueue=%s redshiftHost=%s ftpHost=%s ftpProtocol=%s batchSize=%d filePrefix=%s fileExtension=%s firehoseFormat=%s redshiftQueryChunkSize=%d",
+		"initialized app env=%s awsRegion=%s s3Bucket=%s sqsQueue=%s redshiftHost=%s ftpHost=%s ftpProtocol=%s batchSize=%d redshiftQueryChunkSize=%d",
 		cfg.Environment,
 		s3Client.Region,
 		s3Client.Bucket,
@@ -72,9 +70,6 @@ func run() error {
 		ftpClientConfig.Host,
 		ftpClientConfig.Protocol,
 		batchSize,
-		filePrefix,
-		fileExtension,
-		cfg.Batch.OutputFormat,
 		cfg.Redshift.QueryChunkSize,
 	)
 

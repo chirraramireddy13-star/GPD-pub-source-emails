@@ -88,9 +88,6 @@ External integrations are still abstracted behind injectable functions. Real pro
 ### Firehose and batching
 
 - `BATCH_SIZE`
-- `FILE_NAME_PREFIX`
-- `FILE_NAME_EXTENSION`
-- `FIREHOSE_OUTPUT_FORMAT`
 - `REQUEST_FILE_PREFIX`
 - `REQUEST_OUTPUT_DIR`
 

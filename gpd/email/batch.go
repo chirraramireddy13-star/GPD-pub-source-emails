@@ -19,8 +19,6 @@ var requestFileSequence uint64
 
 type BatchSettings struct {
 	Size              int
-	Prefix            string
-	Extension         string
 	RequestFilePrefix string
 	RequestOutputDir  string
 }
@@ -31,27 +29,14 @@ type EmailVerificationRequestBatch struct {
 }
 
 func NewBatchSettings(cfg config.BatchConfig) (BatchSettings, error) {
-	ext := strings.TrimSpace(cfg.FileNameExtension)
-	if ext == "" {
-		ext = ".json"
-	}
-	if !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-
 	settings := BatchSettings{
 		Size:              cfg.BatchSize,
-		Prefix:            strings.TrimSpace(cfg.FileNamePrefix),
-		Extension:         strings.ToLower(ext),
 		RequestFilePrefix: strings.TrimSpace(cfg.RequestFilePrefix),
 		RequestOutputDir:  strings.TrimSpace(cfg.RequestOutputDir),
 	}
 
 	if settings.Size <= 0 {
 		return BatchSettings{}, fmt.Errorf("batch size must be greater than zero")
-	}
-	if settings.Prefix == "" {
-		return BatchSettings{}, fmt.Errorf("file name prefix is required")
 	}
 	if settings.RequestFilePrefix == "" {
 		return BatchSettings{}, fmt.Errorf("request file prefix is required")

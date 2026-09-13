@@ -83,23 +83,30 @@ func ParseS3ObjectFromSQSMessage(body string) (S3ObjectRef, error) {
 	}, nil
 }
 
-func ValidateExpectedFirehoseObject(object S3ObjectRef, expectedBucket string, batch BatchSettings) error {
+func ValidateExpectedFirehoseObject(object S3ObjectRef, expectedBucket string) error {
 	if strings.TrimSpace(expectedBucket) == "" {
 		return fmt.Errorf("expected bucket is empty")
 	}
 	if object.Bucket != expectedBucket {
 		return fmt.Errorf("unexpected bucket: %s", object.Bucket)
 	}
-
-	baseName := path.Base(object.Key)
-	if !strings.HasPrefix(baseName, batch.Prefix) {
-		return fmt.Errorf("unexpected file prefix for key: %s", object.Key)
-	}
-	if !strings.HasSuffix(strings.ToLower(baseName), batch.Extension) {
-		return fmt.Errorf("unexpected file extension for key: %s", object.Key)
+	if strings.TrimSpace(object.Key) == "" {
+		return fmt.Errorf("missing object key in S3 event")
 	}
 
 	return nil
+}
+
+func InferFirehoseFormatFromObjectKey(objectKey string) string {
+	ext := strings.ToLower(strings.TrimSpace(path.Ext(objectKey)))
+	switch ext {
+	case ".csv":
+		return "csv"
+	case ".json", ".ndjson":
+		return "json"
+	default:
+		return ""
+	}
 }
 
 func decodeS3ObjectKey(raw string) (string, error) {
@@ -122,15 +129,82 @@ func ExtractEmailsFromFirehoseStream(r io.Reader, outputFormat string) ([]string
 }
 
 func ExtractEmailsFromFirehoseStreamWithMetrics(r io.Reader, outputFormat string) ([]string, ExtractionMetrics, error) {
-	format := strings.ToLower(strings.TrimSpace(outputFormat))
-	switch format {
-	case "csv":
-		return extractEmailsFromCSV(r)
-	case "json":
-		return extractEmailsFromJSON(r)
-	default:
-		return nil, ExtractionMetrics{}, fmt.Errorf("unsupported firehose output format: %s", outputFormat)
+	emails, metrics, _, err := ExtractEmailsFromFirehoseStreamWithDetectedFormat(r, outputFormat)
+	if err != nil {
+		return nil, ExtractionMetrics{}, err
 	}
+
+	return emails, metrics, nil
+}
+
+func ExtractEmailsFromFirehoseStreamWithDetectedFormat(r io.Reader, outputFormat string) ([]string, ExtractionMetrics, string, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, ExtractionMetrics{}, "", fmt.Errorf("read firehose payload: %w", err)
+	}
+
+	trimmedData := strings.TrimSpace(string(data))
+	if trimmedData == "" {
+		return []string{}, ExtractionMetrics{}, normalizeFormat(outputFormat), nil
+	}
+
+	format := strings.ToLower(strings.TrimSpace(outputFormat))
+	candidates := buildFormatCandidates(format, trimmedData)
+	var parseErrs []string
+
+	for _, candidate := range candidates {
+		emails, metrics, err := extractByFormat(candidate, strings.NewReader(trimmedData))
+		if err == nil {
+			return emails, metrics, candidate, nil
+		}
+		parseErrs = append(parseErrs, fmt.Sprintf("%s: %v", candidate, err))
+	}
+
+	return nil, ExtractionMetrics{}, "", fmt.Errorf("unable to parse firehose payload; attempts=%s", strings.Join(parseErrs, "; "))
+}
+
+func normalizeFormat(format string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(format))
+	if trimmed == "csv" || trimmed == "json" {
+		return trimmed
+	}
+	return ""
+}
+
+func buildFormatCandidates(formatHint string, payload string) []string {
+	normalized := normalizeFormat(formatHint)
+	if normalized == "csv" {
+		return []string{"csv", "json"}
+	}
+	if normalized == "json" {
+		return []string{"json", "csv"}
+	}
+
+	if looksLikeJSON(payload) {
+		return []string{"json", "csv"}
+	}
+
+	return []string{"csv", "json"}
+}
+
+func looksLikeJSON(payload string) bool {
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" {
+		return false
+	}
+
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+}
+
+func extractByFormat(format string, r io.Reader) ([]string, ExtractionMetrics, error) {
+	if format == "csv" {
+		return extractEmailsFromCSV(r)
+	}
+	if format == "json" {
+		return extractEmailsFromJSON(r)
+	}
+
+	return nil, ExtractionMetrics{}, fmt.Errorf("unsupported firehose output format: %s", format)
 }
 
 func NormalizeEmail(raw string) string {
