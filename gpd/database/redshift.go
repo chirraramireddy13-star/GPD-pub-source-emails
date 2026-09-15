@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,9 @@ type RedshiftConnection struct {
 	Host             string
 	Port             int
 	Database         string
+	Schema           string
+	EmailTable       string
+	EmailColumn      string
 	User             string
 	SSLMode          string
 	DSN              string
@@ -24,6 +28,8 @@ type RedshiftConnection struct {
 }
 
 type EmailLookupQuery func(ctx context.Context, query string, args []any) ([]string, error)
+
+var sqlIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func NewRedshiftConnection(cfg config.RedshiftConfig) (*RedshiftConnection, error) {
 	if cfg.Host == "" {
@@ -34,6 +40,24 @@ func NewRedshiftConnection(cfg config.RedshiftConfig) (*RedshiftConnection, erro
 	}
 	if cfg.Database == "" {
 		return nil, fmt.Errorf("REDSHIFT_DATABASE is required")
+	}
+	if strings.TrimSpace(cfg.Schema) == "" {
+		cfg.Schema = "public"
+	}
+	if strings.TrimSpace(cfg.EmailTable) == "" {
+		cfg.EmailTable = "emailunique"
+	}
+	if strings.TrimSpace(cfg.EmailColumn) == "" {
+		cfg.EmailColumn = "emailaddress"
+	}
+	if !isValidSQLIdentifier(cfg.Schema) {
+		return nil, fmt.Errorf("invalid REDSHIFT_SCHEMA: %s", cfg.Schema)
+	}
+	if !isValidSQLIdentifier(cfg.EmailTable) {
+		return nil, fmt.Errorf("invalid REDSHIFT_EMAIL_TABLE: %s", cfg.EmailTable)
+	}
+	if !isValidSQLIdentifier(cfg.EmailColumn) {
+		return nil, fmt.Errorf("invalid REDSHIFT_EMAIL_COLUMN: %s", cfg.EmailColumn)
 	}
 	if cfg.User == "" {
 		return nil, fmt.Errorf("REDSHIFT_USER is required")
@@ -64,6 +88,9 @@ func NewRedshiftConnection(cfg config.RedshiftConfig) (*RedshiftConnection, erro
 		Host:             cfg.Host,
 		Port:             cfg.Port,
 		Database:         cfg.Database,
+		Schema:           cfg.Schema,
+		EmailTable:       cfg.EmailTable,
+		EmailColumn:      cfg.EmailColumn,
 		User:             cfg.User,
 		SSLMode:          cfg.SSLMode,
 		DSN:              dsn,
@@ -99,7 +126,7 @@ func (c *RedshiftConnection) ExistingEmails(ctx context.Context, emails []string
 		}
 
 		chunk := emails[start:end]
-		query, args := buildEmailUniqueQuery(chunk)
+		query, args := buildEmailLookupQuery(c.qualifiedEmailTable(), c.EmailColumn, chunk)
 
 		chunkMatches, err := c.emailLookupQuery(ctx, query, args)
 		if err != nil {
@@ -131,7 +158,7 @@ func mergeLookupSet(target map[string]struct{}, source map[string]struct{}) {
 	}
 }
 
-func buildEmailUniqueQuery(chunk []string) (string, []any) {
+func buildEmailLookupQuery(qualifiedTable string, emailColumn string, chunk []string) (string, []any) {
 	placeholders := make([]string, 0, len(chunk))
 	args := make([]any, 0, len(chunk))
 	for i, addr := range chunk {
@@ -140,11 +167,22 @@ func buildEmailUniqueQuery(chunk []string) (string, []any) {
 	}
 
 	query := fmt.Sprintf(
-		"SELECT email FROM EmailUnique WHERE lower(trim(email)) IN (%s)",
+		"SELECT %s FROM %s WHERE lower(trim(%s)) IN (%s)",
+		emailColumn,
+		qualifiedTable,
+		emailColumn,
 		strings.Join(placeholders, ", "),
 	)
 
 	return query, args
+}
+
+func (c *RedshiftConnection) qualifiedEmailTable() string {
+	return fmt.Sprintf("%s.%s", c.Schema, c.EmailTable)
+}
+
+func isValidSQLIdentifier(value string) bool {
+	return sqlIdentifierPattern.MatchString(strings.TrimSpace(value))
 }
 
 func normalizeEmailValue(value string) string {

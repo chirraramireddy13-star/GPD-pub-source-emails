@@ -33,6 +33,9 @@ type RedshiftConfig struct {
 	Host           string
 	Port           int
 	Database       string
+	Schema         string
+	EmailTable     string
+	EmailColumn    string
 	User           string
 	Password       string
 	SSLMode        string
@@ -108,6 +111,9 @@ func Load() (*Config, error) {
 			Host:           getEnv("REDSHIFT_HOST", ""),
 			Port:           redshiftPort,
 			Database:       getEnv("REDSHIFT_DATABASE", ""),
+			Schema:         getEnv("REDSHIFT_SCHEMA", "public"),
+			EmailTable:     getEnv("REDSHIFT_EMAIL_TABLE", "emailunique"),
+			EmailColumn:    getEnv("REDSHIFT_EMAIL_COLUMN", "emailaddress"),
 			User:           getEnv("REDSHIFT_USER", ""),
 			Password:       getEnv("REDSHIFT_PASSWORD", ""),
 			SSLMode:        strings.ToLower(getEnv("REDSHIFT_SSLMODE", "require")),

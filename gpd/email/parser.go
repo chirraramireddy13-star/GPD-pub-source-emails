@@ -104,6 +104,8 @@ func InferFirehoseFormatFromObjectKey(objectKey string) string {
 		return "csv"
 	case ".json", ".ndjson":
 		return "json"
+	case ".txt", ".text", ".log":
+		return "text"
 	default:
 		return ""
 	}
@@ -165,7 +167,7 @@ func ExtractEmailsFromFirehoseStreamWithDetectedFormat(r io.Reader, outputFormat
 
 func normalizeFormat(format string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(format))
-	if trimmed == "csv" || trimmed == "json" {
+	if trimmed == "csv" || trimmed == "json" || trimmed == "text" {
 		return trimmed
 	}
 	return ""
@@ -174,17 +176,20 @@ func normalizeFormat(format string) string {
 func buildFormatCandidates(formatHint string, payload string) []string {
 	normalized := normalizeFormat(formatHint)
 	if normalized == "csv" {
-		return []string{"csv", "json"}
+		return []string{"csv", "text", "json"}
 	}
 	if normalized == "json" {
-		return []string{"json", "csv"}
+		return []string{"json", "csv", "text"}
+	}
+	if normalized == "text" {
+		return []string{"text", "csv", "json"}
 	}
 
 	if looksLikeJSON(payload) {
-		return []string{"json", "csv"}
+		return []string{"json", "csv", "text"}
 	}
 
-	return []string{"csv", "json"}
+	return []string{"text", "csv", "json"}
 }
 
 func looksLikeJSON(payload string) bool {
@@ -202,6 +207,9 @@ func extractByFormat(format string, r io.Reader) ([]string, ExtractionMetrics, e
 	}
 	if format == "json" {
 		return extractEmailsFromJSON(r)
+	}
+	if format == "text" {
+		return extractEmailsFromPlainText(r)
 	}
 
 	return nil, ExtractionMetrics{}, fmt.Errorf("unsupported firehose output format: %s", format)
@@ -290,6 +298,7 @@ func extractEmailsFromJSON(r io.Reader) ([]string, ExtractionMetrics, error) {
 func extractEmailsFromNDJSON(r io.Reader) ([]string, ExtractionMetrics, error) {
 	validEmails := make([]string, 0)
 	metrics := ExtractionMetrics{}
+	parsedJSONRecords := 0
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -304,6 +313,7 @@ func extractEmailsFromNDJSON(r io.Reader) ([]string, ExtractionMetrics, error) {
 			markInvalidRecord(&metrics)
 			continue
 		}
+		parsedJSONRecords++
 
 		rawEmail, ok := record["email"].(string)
 		if !ok {
@@ -316,8 +326,64 @@ func extractEmailsFromNDJSON(r io.Reader) ([]string, ExtractionMetrics, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, ExtractionMetrics{}, fmt.Errorf("scan ndjson: %w", err)
 	}
+	if metrics.TotalRecords > 0 && parsedJSONRecords == 0 {
+		return nil, ExtractionMetrics{}, fmt.Errorf("payload is not valid ndjson")
+	}
 
 	return validEmails, metrics, nil
+}
+
+func extractEmailsFromPlainText(r io.Reader) ([]string, ExtractionMetrics, error) {
+	validEmails := make([]string, 0)
+	metrics := ExtractionMetrics{}
+	seenLineWithEmail := false
+
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		metrics.TotalRecords++
+		lineHadValidEmail := false
+
+		for _, token := range tokenizePlainTextLine(line) {
+			normalized := NormalizeEmail(token)
+			if IsValidEmail(normalized) {
+				validEmails = append(validEmails, normalized)
+				lineHadValidEmail = true
+			}
+		}
+
+		if lineHadValidEmail {
+			seenLineWithEmail = true
+		} else {
+			markInvalidRecord(&metrics)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, ExtractionMetrics{}, fmt.Errorf("scan plain text payload: %w", err)
+	}
+
+	if metrics.TotalRecords > 0 && !seenLineWithEmail {
+		return nil, ExtractionMetrics{}, fmt.Errorf("payload has no valid plain-text email records")
+	}
+
+	return validEmails, metrics, nil
+}
+
+func tokenizePlainTextLine(line string) []string {
+	separators := func(r rune) bool {
+		switch r {
+		case ',', ';', '\t', ' ', '|':
+			return true
+		default:
+			return false
+		}
+	}
+
+	return strings.FieldsFunc(line, separators)
 }
 
 func collectEmailsFromMapRecords(records []map[string]any) ([]string, ExtractionMetrics, error) {

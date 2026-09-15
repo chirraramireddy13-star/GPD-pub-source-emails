@@ -17,18 +17,19 @@ flowchart TD
     H --> I[Receive SQS Messages]
     I --> J[Parse SQS Event]
     J --> K[Extract S3 Bucket and Key]
-    K --> L[Validate Expected Firehose File]
-    L --> M[Download File From S3]
-    M --> N[Parse CSV or JSON Records]
-    N --> O[Normalize and Validate Emails]
-    O --> P[In-Memory Deduplication]
-    P --> Q[Chunked Redshift Lookup]
-    Q --> R[Filter Existing Emails]
-    R --> S[Split New Emails Into Batches]
-    S --> T[Create Request Files]
-    T --> U[Upload Files To FTP or SFTP]
-    U --> V[Log Metrics]
-    V --> W[Processing Succeeded]
+    K --> L[Validate Expected Bucket and Key]
+    L --> M[Infer Source Format From Key and Content]
+    M --> N[Download File From S3]
+    N --> O[Parse CSV JSON or Plain Text Records]
+    O --> P[Normalize and Validate Emails]
+    P --> Q[In-Memory Deduplication]
+    Q --> R[Chunked Redshift Lookup]
+    R --> S[Filter Existing Emails]
+    S --> T[Split New Emails Into Batches]
+    T --> U[Create Request Files]
+    U --> V[Upload Files To FTP or SFTP]
+    V --> W[Log Metrics]
+    W --> X[Processing Succeeded]
 ```
 
 ## Startup Sequence
@@ -68,17 +69,26 @@ This step:
 - extracts the S3 bucket name
 - extracts the S3 object key
 - decodes the key if needed
-- validates the file against the configured expected bucket, prefix, and extension
+- validates the event against the configured expected bucket and a non-empty key
 
 If this step fails, the message is treated as a malformed SQS message.
 
-### 3. Download the Firehose Output File From S3
+### 3. Infer Input Format
+
+Before parsing records, the processor determines source format in [email/parser.go](email/parser.go):
+
+- infers format from object-key extension when available (`.csv`, `.json`, `.ndjson`, `.txt`, `.text`, `.log`)
+- falls back to content-based detection and parser retries if extension is absent or misleading
+
+This allows ingestion of files with inconsistent naming as long as payload content is parseable.
+
+### 4. Download the Firehose Output File From S3
 
 The processor calls the S3 client in [aws/s3utils.go](aws/s3utils.go) to download the object as a stream.
 
 This step currently uses the `GetObject` abstraction and is retried on failure.
 
-### 4. Parse Records and Extract Emails
+### 5. Parse Records and Extract Emails
 
 The S3 payload is parsed in [email/parser.go](email/parser.go).
 
@@ -87,6 +97,7 @@ Supported formats:
 - CSV
 - JSON array
 - NDJSON
+- Plain text (one or more emails per line, including comma/semicolon/space/tab/pipe-separated tokens)
 
 For every record, the parser:
 
@@ -100,7 +111,7 @@ For every record, the parser:
 
 If parsing fails at the file level, the input is treated as a corrupted input file.
 
-### 5. Deduplicate Within the Same Firehose File
+### 6. Deduplicate Within the Same Firehose File
 
 In-memory deduplication is handled in [email/dedup.go](email/dedup.go).
 
@@ -108,27 +119,27 @@ In-memory deduplication is handled in [email/dedup.go](email/dedup.go).
 - Preserves first-seen order.
 - Removes duplicates within the same batch only.
 
-### 6. Check Existing Emails in Redshift
+### 7. Check Existing Emails in Redshift
 
 The processor uses [database/redshift.go](database/redshift.go) to look up already-known emails.
 
 Behavior:
 
 - splits unique emails into configured chunks
-- builds batched `IN (...)` lookup queries against `EmailUnique`
+- builds batched `IN (...)` lookup queries against configured `REDSHIFT_SCHEMA.REDSHIFT_EMAIL_TABLE` and `REDSHIFT_EMAIL_COLUMN`
 - normalizes Redshift results into a lookup set
 - avoids one query per email
 
 This step is retried on failure.
 
-### 7. Filter Already-Existing Emails
+### 8. Filter Already-Existing Emails
 
 Filtering is handled in [email/filter.go](email/filter.go).
 
 - Emails returned by Redshift are removed.
 - Only new emails move to the request-generation stage.
 
-### 8. Split New Emails Into Verification Batches
+### 9. Split New Emails Into Verification Batches
 
 Batch splitting is implemented in [email/batch.go](email/batch.go).
 
@@ -136,7 +147,7 @@ Batch splitting is implemented in [email/batch.go](email/batch.go).
 - Avoids generating one large request payload.
 - Produces one or more logical Email Verification Request batches.
 
-### 9. Create Request Files
+### 10. Create Request Files
 
 Request files are created in [email/batch.go](email/batch.go).
 
@@ -144,6 +155,7 @@ Behavior:
 
 - writes one file per verification batch
 - supports CSV and JSON output
+- maps non-CSV source formats (JSON/plain text) to JSON request output
 - generates collision-resistant filenames using:
   - UTC timestamp
   - in-process sequence number
@@ -152,7 +164,7 @@ Behavior:
 
 This step is retried on failure.
 
-### 10. Upload Request Files to FTP or SFTP
+### 11. Upload Request Files to FTP or SFTP
 
 Uploads are handled in [ftp/ftp.go](ftp/ftp.go).
 
@@ -164,7 +176,7 @@ Behavior:
 
 This step is retried on failure.
 
-### 11. Success Criteria
+### 12. Success Criteria
 
 A message is considered successfully processed only when:
 
@@ -215,6 +227,7 @@ Not retried:
 Per processed S3 file, the processor logs:
 
 - S3 file processed
+- Source format
 - Total records
 - Invalid records
 - Duplicate records removed
@@ -255,18 +268,15 @@ Per processed S3 file, the processor logs:
 
 ## Current Integration Status
 
-The application flow is implemented, but external services are still abstracted behind injectable functions.
+Core integrations are wired with production libraries:
 
-Current abstractions:
+- AWS SDK v2 for SQS and S3
+- pgx/pgxpool for Redshift lookups
+- pkg/sftp with x/crypto/ssh for SFTP uploads
 
-- SQS uses an injectable receiver.
-- S3 uses an injectable getter.
-- Redshift uses an injectable query function.
-- FTP uses an injectable uploader.
+Abstraction hooks still exist for testing and override scenarios (injectable receive/get/query/upload functions).
 
-That means the orchestration and control flow are complete, but production integration still requires wiring real implementations for:
+Known limitation:
 
-- AWS SQS
-- AWS S3
-- Redshift SQL access
-- FTP/SFTP transport
+- `FTP_PROTOCOL=sftp` is fully implemented.
+- `FTP_PROTOCOL=ftp` currently has no concrete uploader implementation and returns an uploader-not-configured error.

@@ -61,12 +61,15 @@ func run() error {
 	batchSize := cfg.Batch.BatchSize
 
 	appLogger.Printf(
-		"initialized app env=%s awsRegion=%s s3Bucket=%s sqsQueue=%s redshiftHost=%s ftpHost=%s ftpProtocol=%s batchSize=%d redshiftQueryChunkSize=%d",
+		"initialized app env=%s awsRegion=%s s3Bucket=%s sqsQueue=%s redshiftHost=%s redshiftSchema=%s redshiftEmailTable=%s redshiftEmailColumn=%s ftpHost=%s ftpProtocol=%s batchSize=%d redshiftQueryChunkSize=%d",
 		cfg.Environment,
 		s3Client.Region,
 		s3Client.Bucket,
 		sqsClient.QueueURL,
 		redshiftConn.Host,
+		redshiftConn.Schema,
+		redshiftConn.EmailTable,
+		redshiftConn.EmailColumn,
 		ftpClientConfig.Host,
 		ftpClientConfig.Protocol,
 		batchSize,

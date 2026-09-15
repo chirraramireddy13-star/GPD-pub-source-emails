@@ -371,8 +371,9 @@ func (p *EmailProcessor) lookupExistingEmailsWithRetry(ctx context.Context, uniq
 
 func (p *EmailProcessor) createRequestFilesWithRetry(ctx context.Context, verificationBatches []email.EmailVerificationRequestBatch, outputFormat string) ([]string, error) {
 	var createdFiles []string
+	requestOutputFormat := resolveRequestOutputFormat(outputFormat)
 	err := p.runRetryStep(ctx, failureFileGeneration, processingRetryAttempts, transientStepRetryDelay, nil, func(attempt int) error {
-		result, err := email.CreateVerificationRequestFiles(verificationBatches, p.batchSettings, outputFormat)
+		result, err := email.CreateVerificationRequestFiles(verificationBatches, p.batchSettings, requestOutputFormat)
 		if err != nil {
 			return err
 		}
@@ -384,6 +385,14 @@ func (p *EmailProcessor) createRequestFilesWithRetry(ctx context.Context, verifi
 	}
 
 	return createdFiles, nil
+}
+
+func resolveRequestOutputFormat(sourceFormat string) string {
+	if sourceFormat == "csv" {
+		return "csv"
+	}
+
+	return "json"
 }
 
 func (p *EmailProcessor) uploadFilesWithRetry(ctx context.Context, createdFiles []string) ([]string, error) {

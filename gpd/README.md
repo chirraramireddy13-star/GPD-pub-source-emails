@@ -12,7 +12,7 @@ The orchestration flow is implemented in code, including:
 - continuous SQS polling
 - SQS event parsing
 - S3 object download
-- CSV and JSON parsing
+- CSV, JSON, and plain-text parsing
 - email normalization and validation
 - in-memory deduplication
 - batched Redshift existence lookup
@@ -24,12 +24,15 @@ The orchestration flow is implemented in code, including:
 - categorized failure handling and retries
 - processing metrics logging
 
-External integrations are still abstracted behind injectable functions. Real production implementations still need to be wired for:
+Core integrations are wired in production code:
 
-- AWS SQS
-- AWS S3
-- Redshift SQL access
-- FTP or SFTP transport
+- AWS SDK v2 for SQS and S3
+- pgx/pgxpool for Redshift lookups
+- pkg/sftp with x/crypto/ssh for SFTP uploads
+
+Known limitation:
+
+- `FTP_PROTOCOL=ftp` is accepted by configuration but does not have a concrete uploader implementation yet.
 
 ## Project Flow
 
@@ -37,17 +40,18 @@ External integrations are still abstracted behind injectable functions. Real pro
 2. Initialize logger and service clients.
 3. Poll SQS continuously with long polling.
 4. Parse the SQS payload and extract S3 bucket and object key.
-5. Download the Firehose batch file from S3.
-6. Parse records and extract normalized valid emails.
-7. Deduplicate emails in memory.
-8. Query Redshift in chunks to find already-known emails.
-9. Filter existing emails out.
-10. Split new emails into verification request batches.
-11. Create request batch files on disk.
-12. Upload each batch file to FTP or SFTP.
-13. Delete the SQS message after the full success path completes.
-14. Log processing metrics.
-15. Treat the message as successful only after all required uploads and SQS deletion succeed.
+5. Validate expected bucket and infer source format from object key and payload content.
+6. Download the Firehose batch file from S3.
+7. Parse records and extract normalized valid emails.
+8. Deduplicate emails in memory.
+9. Query Redshift in chunks to find already-known emails.
+10. Filter existing emails out.
+11. Split new emails into verification request batches.
+12. Create request batch files on disk.
+13. Upload each batch file to FTP or SFTP.
+14. Delete the SQS message after the full success path completes.
+15. Log processing metrics.
+16. Treat the message as successful only after all required uploads and SQS deletion succeed.
 
 ## Required Environment Variables
 
@@ -70,6 +74,9 @@ External integrations are still abstracted behind injectable functions. Real pro
 - `REDSHIFT_HOST`
 - `REDSHIFT_PORT`
 - `REDSHIFT_DATABASE`
+- `REDSHIFT_SCHEMA` (optional, default `public`)
+- `REDSHIFT_EMAIL_TABLE` (optional, default `emailunique`)
+- `REDSHIFT_EMAIL_COLUMN` (optional, default `emailaddress`)
 - `REDSHIFT_USER`
 - `REDSHIFT_PASSWORD`
 - `REDSHIFT_SSLMODE`
@@ -94,6 +101,77 @@ External integrations are still abstracted behind injectable functions. Real pro
 ## Local Output
 
 Generated Email Verification Request files are written to the configured `REQUEST_OUTPUT_DIR` before upload.
+
+## Input Format Detection
+
+Firehose source input format is inferred per object from key extension and payload content.
+
+- Extensions supported: `.csv`, `.json`, `.ndjson`, `.txt`, `.text`, `.log`
+- Content fallback supports CSV, JSON (array/NDJSON), and plain text email lines
+
+## Operator Validation Samples
+
+Use these samples to validate parser behavior quickly.
+
+### Sample SQS Event Body
+
+```json
+{
+	"Records": [
+		{
+			"eventVersion": "2.1",
+			"eventSource": "aws:s3",
+			"awsRegion": "us-east-1",
+			"eventTime": "2026-09-14T12:04:48.000Z",
+			"eventName": "ObjectCreated:Put",
+			"s3": {
+				"s3SchemaVersion": "1.0",
+				"bucket": {
+					"name": "dnb-gpd-redshift-transfer-dev"
+				},
+				"object": {
+					"key": "emails/2026/09/14/11/dnb-gpd-email-stream-dev-1-2026-09-14-11-04-47.txt",
+					"size": 1889
+				}
+			}
+		}
+	]
+}
+```
+
+### Sample Payload: CSV
+
+```csv
+email
+alice@example.com
+bob@example.com
+Alice@example.com
+not-an-email
+```
+
+### Sample Payload: NDJSON
+
+```json
+{"email":"alice@example.com"}
+{"email":"bob@example.com"}
+{"email":"Alice@example.com"}
+{"email":"bad-value"}
+```
+
+### Sample Payload: Plain Text
+
+```text
+alice@example.com
+bob@example.com; carol@example.com
+Alice@example.com | dave@example.com
+not-an-email
+```
+
+Expected behavior for all samples:
+
+- emails are normalized to lowercase
+- invalid email values are counted as invalid records
+- duplicates are removed during in-memory deduplication
 
 ## Entry Point
 
